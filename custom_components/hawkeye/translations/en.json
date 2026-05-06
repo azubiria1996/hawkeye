@@ -1,0 +1,130 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Hawkeye initial setup",
+        "description": "Configure the main sensors Hawkeye will use to measure your consumption and prices.\n\nThe total consumption sensor should be your grid meter. The price sensor is optional — if you have Power Pricing, Nordpool or PVPC, select it here.",
+        "data": {
+          "total_consumption_sensor": "Total consumption sensor (grid import)",
+          "price_sensor": "Price sensor (optional)",
+          "price_fallback_eur_kwh": "Flat fallback price (€/kWh)"
+        }
+      },
+      "add_asset": {
+        "title": "Add equipment ({n_assets} already added)",
+        "description": "What type of equipment do you want to add?",
+        "data": {
+          "type": "Equipment type"
+        }
+      },
+      "add_appliance": {
+        "title": "Configure appliance",
+        "data": {
+          "name": "Name (washer, dishwasher, dryer...)",
+          "sensor": "Appliance consumption sensor",
+          "days_of_week": "Typical days of use",
+          "naive_start_hour": "Typical start hour (unmanaged)",
+          "naive_duration_hours": "Cycle duration (hours)"
+        }
+      },
+      "add_ev": {
+        "title": "Configure electric vehicle",
+        "data": {
+          "name": "Name",
+          "sensor": "Charger consumption sensor",
+          "naive_arrival_hour": "Typical arrival hour",
+          "max_power_kw": "Charger max power (kW)"
+        }
+      },
+      "add_solar": {
+        "title": "Configure solar PV",
+        "data": {
+          "name": "Name",
+          "sensor": "Solar generation sensor"
+        }
+      },
+      "more": {
+        "title": "{n_assets} equipment added",
+        "description": "Equipment: {asset_names}\n\nAdd another or finish?",
+        "data": {
+          "action": "Action"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Edit Hawkeye",
+        "description": "{n_assets} equipment configured:\n{assets_summary}",
+        "data": {"choice": "What to do"}
+      },
+      "edit_global": {
+        "title": "Edit main sensors",
+        "data": {
+          "total_consumption_sensor": "Total consumption sensor",
+          "price_sensor": "Price sensor (optional)",
+          "price_fallback_eur_kwh": "Flat fallback price (€/kWh)"
+        }
+      },
+      "add_asset": {
+        "title": "Add equipment ({n_assets})",
+        "data": {"type": "Type"}
+      },
+      "add_appliance": {
+        "title": "Configure appliance",
+        "data": {
+          "name": "Name",
+          "sensor": "Sensor",
+          "days_of_week": "Days",
+          "naive_start_hour": "Typical hour",
+          "naive_duration_hours": "Duration (hours)"
+        }
+      },
+      "add_ev": {
+        "title": "Configure EV",
+        "data": {
+          "name": "Name",
+          "sensor": "Sensor",
+          "naive_arrival_hour": "Arrival hour",
+          "max_power_kw": "Power (kW)"
+        }
+      },
+      "add_solar": {
+        "title": "Configure solar",
+        "data": {"name": "Name", "sensor": "Sensor"}
+      },
+      "more": {
+        "title": "{n_assets} equipment added",
+        "description": "Equipment: {asset_names}",
+        "data": {"action": "Action"}
+      }
+    }
+  },
+  "services": {
+    "recalculate_today": {
+      "name": "Recalculate today",
+      "description": "Force a manual recalculation of today's baseline and savings."
+    },
+    "set_override": {
+      "name": "Override pattern for a single day",
+      "description": "Modifies the naive pattern of an equipment for a specific date.",
+      "fields": {
+        "asset_name": {"name": "Equipment name", "description": ""},
+        "date": {"name": "Date", "description": "YYYY-MM-DD"},
+        "naive_start_hour": {"name": "Start hour", "description": ""},
+        "naive_duration_hours": {"name": "Duration", "description": ""},
+        "naive_arrival_hour": {"name": "Arrival hour (EV)", "description": ""},
+        "days_of_week": {"name": "Days of week", "description": ""}
+      }
+    },
+    "clear_override": {
+      "name": "Clear override",
+      "description": "Clears a previously set override.",
+      "fields": {
+        "asset_name": {"name": "Equipment name", "description": ""},
+        "date": {"name": "Date", "description": ""}
+      }
+    }
+  }
+}

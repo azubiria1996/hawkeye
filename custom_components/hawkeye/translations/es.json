@@ -1,0 +1,171 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Configuración inicial de Hawkeye",
+        "description": "Configura los sensores principales que Hawkeye usará para medir tu consumo y los precios.\n\nEl sensor de consumo total debe ser tu medidor de la red (típicamente 'Energía consumida' del panel HA Energy). El sensor de precios es opcional — si tienes Power Pricing, Nordpool o PVPC, selecciónalo aquí.",
+        "data": {
+          "total_consumption_sensor": "Sensor de consumo total (importación de red)",
+          "price_sensor": "Sensor de precios (opcional)",
+          "price_fallback_eur_kwh": "Precio fijo de respaldo (€/kWh)"
+        },
+        "data_description": {
+          "total_consumption_sensor": "Sensor con tu consumo acumulado en kWh, neto de solar si la tienes.",
+          "price_sensor": "Sensor que provee precios horarios. Power Pricing, Nordpool, PVPC...",
+          "price_fallback_eur_kwh": "Se usa si el sensor de precios no responde o no está configurado."
+        }
+      },
+      "add_asset": {
+        "title": "Añadir equipo ({n_assets} ya añadidos)",
+        "description": "¿Qué tipo de equipo quieres añadir?",
+        "data": {
+          "type": "Tipo de equipo"
+        }
+      },
+      "add_appliance": {
+        "title": "Configurar electrodoméstico",
+        "description": "Define el patrón de uso ingenuo: cuándo lo usarías sin gestionar la energía. Esto sirve como referencia para calcular el ahorro.",
+        "data": {
+          "name": "Nombre (lavadora, lavavajillas, secadora...)",
+          "sensor": "Sensor de consumo del electrodoméstico",
+          "days_of_week": "Días típicos de uso",
+          "naive_start_hour": "Hora típica de inicio (sin gestionar)",
+          "naive_duration_hours": "Duración del ciclo (horas)"
+        }
+      },
+      "add_ev": {
+        "title": "Configurar vehículo eléctrico",
+        "description": "Define cuándo y cómo cargarías el coche sin gestionar (carga inmediata al llegar).",
+        "data": {
+          "name": "Nombre",
+          "sensor": "Sensor de consumo del cargador",
+          "naive_arrival_hour": "Hora típica de llegada",
+          "max_power_kw": "Potencia máxima del cargador (kW)"
+        }
+      },
+      "add_solar": {
+        "title": "Configurar solar fotovoltaica",
+        "description": "Sensor de generación solar (kWh).",
+        "data": {
+          "name": "Nombre",
+          "sensor": "Sensor de generación solar"
+        }
+      },
+      "more": {
+        "title": "{n_assets} equipos añadidos",
+        "description": "Equipos: {asset_names}\n\n¿Quieres añadir otro o terminar?",
+        "data": {
+          "action": "Acción"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Editar Hawkeye",
+        "description": "{n_assets} equipos configurados:\n{assets_summary}",
+        "data": {
+          "choice": "Qué quieres hacer"
+        }
+      },
+      "edit_global": {
+        "title": "Editar sensores principales",
+        "data": {
+          "total_consumption_sensor": "Sensor de consumo total",
+          "price_sensor": "Sensor de precios (opcional)",
+          "price_fallback_eur_kwh": "Precio fijo de respaldo (€/kWh)"
+        }
+      },
+      "add_asset": {
+        "title": "Añadir equipo ({n_assets})",
+        "data": {
+          "type": "Tipo"
+        }
+      },
+      "add_appliance": {
+        "title": "Configurar electrodoméstico",
+        "data": {
+          "name": "Nombre",
+          "sensor": "Sensor",
+          "days_of_week": "Días",
+          "naive_start_hour": "Hora típica",
+          "naive_duration_hours": "Duración (horas)"
+        }
+      },
+      "add_ev": {
+        "title": "Configurar VE",
+        "data": {
+          "name": "Nombre",
+          "sensor": "Sensor",
+          "naive_arrival_hour": "Hora llegada",
+          "max_power_kw": "Potencia (kW)"
+        }
+      },
+      "add_solar": {
+        "title": "Configurar solar",
+        "data": {
+          "name": "Nombre",
+          "sensor": "Sensor"
+        }
+      },
+      "more": {
+        "title": "{n_assets} equipos añadidos",
+        "description": "Equipos: {asset_names}",
+        "data": {
+          "action": "Acción"
+        }
+      }
+    }
+  },
+  "services": {
+    "recalculate_today": {
+      "name": "Recalcular hoy",
+      "description": "Fuerza un recálculo manual del baseline y el ahorro del día actual."
+    },
+    "set_override": {
+      "name": "Cambiar patrón solo para un día",
+      "description": "Modifica el patrón ingenuo de un equipo para una fecha concreta. Útil cuando rompes la rutina (ej. mañana lavo a otra hora).",
+      "fields": {
+        "asset_name": {
+          "name": "Nombre del equipo",
+          "description": "El nombre tal y como lo configuraste (ej. lavadora)."
+        },
+        "date": {
+          "name": "Fecha",
+          "description": "Fecha concreta a modificar (formato YYYY-MM-DD)."
+        },
+        "naive_start_hour": {
+          "name": "Hora de inicio (electrodomésticos)",
+          "description": "Hora típica para ese día concreto."
+        },
+        "naive_duration_hours": {
+          "name": "Duración del ciclo",
+          "description": "Duración en horas para ese día."
+        },
+        "naive_arrival_hour": {
+          "name": "Hora de llegada (vehículo eléctrico)",
+          "description": "Hora típica de llegada para ese día."
+        },
+        "days_of_week": {
+          "name": "Días de la semana",
+          "description": "Lista de días (0=lunes, 6=domingo) si quieres modificarlos para ese día."
+        }
+      }
+    },
+    "clear_override": {
+      "name": "Borrar override",
+      "description": "Borra un override puntual previamente establecido.",
+      "fields": {
+        "asset_name": {
+          "name": "Nombre del equipo",
+          "description": ""
+        },
+        "date": {
+          "name": "Fecha",
+          "description": ""
+        }
+      }
+    }
+  }
+}

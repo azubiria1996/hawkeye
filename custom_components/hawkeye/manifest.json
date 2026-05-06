@@ -1,0 +1,13 @@
+{
+  "domain": "hawkeye",
+  "name": "Hawkeye",
+  "version": "0.2.0",
+  "documentation": "https://github.com/azubiria1996/hawkeye",
+  "issue_tracker": "https://github.com/azubiria1996/hawkeye/issues",
+  "dependencies": ["recorder"],
+  "codeowners": ["@azubiria1996"],
+  "requirements": [],
+  "iot_class": "calculated",
+  "config_flow": true,
+  "integration_type": "service"
+}

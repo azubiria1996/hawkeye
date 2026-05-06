@@ -1,0 +1,79 @@
+recalculate_today:
+  name: Recalcular hoy
+  description: Fuerza un recálculo manual del baseline y el ahorro del día actual.
+
+set_override:
+  name: Cambiar patrón para un día concreto
+  description: >
+    Modifica el patrón ingenuo de un equipo para una fecha concreta.
+    Útil cuando rompes la rutina (ej. mañana lavo a otra hora).
+    El override se borra automáticamente cuando pasa la fecha.
+  fields:
+    asset_name:
+      name: Nombre del equipo
+      description: El nombre tal y como lo configuraste (ej. lavadora).
+      required: true
+      example: lavadora
+      selector:
+        text:
+    date:
+      name: Fecha
+      description: Fecha concreta a modificar (formato YYYY-MM-DD).
+      required: true
+      example: "2026-05-07"
+      selector:
+        date:
+    naive_start_hour:
+      name: Hora de inicio (electrodomésticos)
+      description: Hora típica para ese día concreto.
+      required: false
+      example: 14
+      selector:
+        number:
+          min: 0
+          max: 23
+          step: 1
+          mode: slider
+    naive_duration_hours:
+      name: Duración del ciclo
+      description: Duración en horas para ese día.
+      required: false
+      example: 2
+      selector:
+        number:
+          min: 1
+          max: 24
+          step: 1
+    naive_arrival_hour:
+      name: Hora de llegada (vehículo eléctrico)
+      description: Hora típica de llegada para ese día.
+      required: false
+      example: 19
+      selector:
+        number:
+          min: 0
+          max: 23
+          step: 1
+          mode: slider
+    days_of_week:
+      name: Días de la semana
+      description: Lista de días (0=lunes, 6=domingo) si quieres modificarlos.
+      required: false
+      example: "[0, 2, 4]"
+      selector:
+        object:
+
+clear_override:
+  name: Borrar override
+  description: Borra un override puntual previamente establecido.
+  fields:
+    asset_name:
+      name: Nombre del equipo
+      required: true
+      selector:
+        text:
+    date:
+      name: Fecha
+      required: true
+      selector:
+        date:
