@@ -1,12 +1,17 @@
 """Coordinator de Hawkeye.
 
-Cada hora cerrada (al pasar de las XX:59 a las XX+1:00):
-  1. Lee del Recorder el delta del sensor de consumo total para esa hora.
-  2. Lee del Recorder el delta de cada sensor de asset gestionable.
-  3. Llama a calculate_mv() para ese día acumulado hasta esa hora.
-  4. Actualiza el resultado en hass.data y notifica a los sensores.
+Ritmos:
+  - Cada hora cerrada (al pasar de XX:59 a XX+1:00):
+      1. Lee del Recorder el delta del sensor de consumo total para esa hora.
+      2. Lee del Recorder el delta de cada sensor de asset gestionable.
+      3. Lee del Recorder el delta del sensor de coste real (si está configurado).
+      4. Llama a calculate_mv() con los datos acumulados.
+      5. Calcula los acumulados de coste hasta la hora procesada.
+      6. Notifica a los sensores.
+  - Cierre del día a las 00:05 — consolidación final.
 
-A las 00:05 del día siguiente cierra el día y empieza nuevo.
+Los cálculos de COSTE viven aquí (no en sensor.py) para garantizar que los
+sensores siempre tengan valor coherente al render.
 """
 from __future__ import annotations
 
@@ -40,6 +45,7 @@ from .const import (
     CONF_ASSETS,
     CONF_PRICE_FALLBACK,
     CONF_PRICE_SENSOR,
+    CONF_REAL_COST_SENSOR,
     CONF_TOTAL_CONSUMPTION_SENSOR,
     DOMAIN,
 )
@@ -60,7 +66,7 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class HawkeyeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
-    """Coordina las medidas y el cálculo M&V hora a hora."""
+    """Coordina las medidas, el cálculo M&V y los costes hora a hora."""
 
     def __init__(
         self,
@@ -72,7 +78,7 @@ class HawkeyeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             hass,
             _LOGGER,
             name=DOMAIN,
-            update_interval=None,  # Por evento, no por polling
+            update_interval=None,
         )
         self.entry = entry
         self._override_store = override_store
@@ -80,26 +86,31 @@ class HawkeyeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._unsub_midnight = None
         self._unsub_price_sensor = None
 
-        # Estado del cálculo del día actual
+        # Estado del día actual
         self._current_date: Optional[date_type] = None
-        self._real_hourly: list[Optional[float]] = [None] * 24
-        self._asset_hourly: dict[str, list[Optional[float]]] = {}
+        self._real_hourly_kwh: list[Optional[float]] = [None] * 24
+        self._asset_hourly_kwh: dict[str, list[Optional[float]]] = {}
+        self._real_hourly_eur: list[Optional[float]] = [None] * 24
         self._last_hour_processed: int = -1
         self._last_result: Optional[DailyMV] = None
         self._price_source: str = "default"
+        self._real_cost_source: str = "computed"
+
+        # Costes acumulados (precalculados en cada update)
+        self._baseline_hourly_eur: list[Optional[float]] = [None] * 24
+        self._baseline_cost_total: float = 0.0
+        self._real_cost_total: float = 0.0
+        self._savings_today_eur: float = 0.0
 
     # ── Setup / teardown ─────────────────────────────────────────────
 
     async def _async_setup(self) -> None:
-        """Programa los timers."""
-        # Tick cada hora al minuto 0
         self._unsub_hourly = async_track_time_change(
             self.hass,
             self._on_hour_tick,
             minute=0,
             second=5,
         )
-        # Cierre del día a las 00:05
         self._unsub_midnight = async_track_time_change(
             self.hass,
             self._on_midnight,
@@ -108,7 +119,6 @@ class HawkeyeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             second=0,
         )
 
-        # Suscribirse al sensor de precios si hay
         data = self._merged_data()
         price_sensor = data.get(CONF_PRICE_SENSOR)
         if price_sensor:
@@ -132,7 +142,6 @@ class HawkeyeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     @callback
     def _on_midnight(self, _now: datetime) -> None:
         _LOGGER.info("Cierre del día")
-        # Forzamos un último refresh para consolidar
         self.hass.async_create_task(self.async_request_refresh())
 
     @callback
@@ -146,11 +155,7 @@ class HawkeyeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return {**self.entry.data, **self.entry.options}
 
     def _build_assets(self, target_date: date_type) -> list:
-        """Construye la lista de assets aplicando overrides del día.
-
-        Si hay un override para un asset en target_date, sus parámetros
-        se aplican por encima del patrón por defecto.
-        """
+        """Construye la lista de assets aplicando overrides del día."""
         data = self._merged_data()
         raw_assets = data.get(CONF_ASSETS, [])
         assets = []
@@ -158,8 +163,6 @@ class HawkeyeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for raw in raw_assets:
             asset_type = raw[ASSET_TYPE]
             name = raw[ASSET_NAME]
-
-            # Aplicar override si lo hay
             override = self._override_store.get(name, target_date) or {}
 
             if asset_type == ASSET_TYPE_APPLIANCE:
@@ -186,7 +189,6 @@ class HawkeyeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return assets
 
     def _asset_sensor_map(self) -> dict[str, str]:
-        """Devuelve {nombre_asset: entity_id_sensor}."""
         data = self._merged_data()
         return {a[ASSET_NAME]: a[ASSET_SENSOR] for a in data.get(CONF_ASSETS, [])}
 
@@ -198,11 +200,7 @@ class HawkeyeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         hour_start: datetime,
         hour_end: datetime,
     ) -> Optional[float]:
-        """Calcula los kWh consumidos por un sensor entre hour_start y hour_end.
-
-        Para sensores total_increasing, el delta = state(hour_end) - state(hour_start).
-        Si no hay datos, devuelve None.
-        """
+        """Calcula el delta de un sensor entre dos instantes."""
         try:
             recorder = get_instance(self.hass)
 
@@ -222,30 +220,24 @@ class HawkeyeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if not states:
                 return None
 
-            # Filtramos estados numéricos válidos
             numeric = []
             for st in states:
                 try:
                     v = float(st.state)
-                    numeric.append((st.last_changed, v))
+                    numeric.append(v)
                 except (ValueError, TypeError):
                     continue
 
             if len(numeric) < 1:
                 return None
 
-            first_value = numeric[0][1]
-            last_value = numeric[-1][1]
-            delta = last_value - first_value
-
-            # Si hay reset del medidor (delta negativo), no podemos calcular
+            delta = numeric[-1] - numeric[0]
             if delta < 0:
                 _LOGGER.debug(
-                    "Sensor %s reset detectado entre %s y %s",
+                    "Sensor %s: delta negativo (reset?) entre %s y %s",
                     sensor_id, hour_start, hour_end,
                 )
                 return None
-
             return delta
 
         except Exception as exc:
@@ -253,16 +245,14 @@ class HawkeyeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return None
 
     async def _update_hourly_consumption(self, now: datetime) -> None:
-        """Actualiza las medidas hora a hora desde el inicio del día actual.
-
-        Lee el Recorder y rellena las horas que aún no se hayan procesado.
-        """
+        """Lee del Recorder los deltas de cada sensor para cada hora pasada."""
         today = now.date()
-        # Reset si cambiamos de día
         if self._current_date != today:
             self._current_date = today
-            self._real_hourly = [None] * 24
-            self._asset_hourly = {name: [None] * 24 for name in self._asset_sensor_map()}
+            self._real_hourly_kwh = [None] * 24
+            self._asset_hourly_kwh = {name: [None] * 24 for name in self._asset_sensor_map()}
+            self._real_hourly_eur = [None] * 24
+            self._baseline_hourly_eur = [None] * 24
             self._last_hour_processed = -1
 
         data = self._merged_data()
@@ -271,43 +261,45 @@ class HawkeyeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
 
         asset_sensors = self._asset_sensor_map()
+        real_cost_sensor = data.get(CONF_REAL_COST_SENSOR)
 
-        # Solo procesamos horas COMPLETAS (la actual aún está en curso)
         target_last_hour = now.hour - 1
         if now.hour == 0:
-            # Si es la 00, las horas a procesar son las del día ANTERIOR
-            # — pero esa lógica la tratamos en el cierre de día separado.
             return
 
-        # Procesar horas pendientes
         for h in range(self._last_hour_processed + 1, target_last_hour + 1):
             if h < 0 or h >= 24:
                 continue
 
-            hour_start = datetime.combine(today, time(h, 0))
-            hour_end = datetime.combine(today, time(h, 0)) + timedelta(hours=1)
+            local_start = datetime.combine(today, time(h, 0))
+            local_end = local_start + timedelta(hours=1)
+            hour_start = dt_util.as_utc(dt_util.as_local(local_start))
+            hour_end = dt_util.as_utc(dt_util.as_local(local_end))
 
-            # Convertir a UTC tz-aware para Recorder
-            hour_start = dt_util.as_utc(dt_util.as_local(hour_start))
-            hour_end = dt_util.as_utc(dt_util.as_local(hour_end))
-
-            # Total
-            self._real_hourly[h] = await self._read_hour_delta(
+            # Consumo total (kWh)
+            self._real_hourly_kwh[h] = await self._read_hour_delta(
                 total_sensor, hour_start, hour_end,
             )
 
-            # Por cada asset
+            # Consumo por asset (kWh)
             for name, sensor_id in asset_sensors.items():
-                self._asset_hourly[name][h] = await self._read_hour_delta(
+                self._asset_hourly_kwh[name][h] = await self._read_hour_delta(
                     sensor_id, hour_start, hour_end,
                 )
 
+            # Coste real (€) — desde el sensor del panel HA Energy si está
+            if real_cost_sensor:
+                self._real_hourly_eur[h] = await self._read_hour_delta(
+                    real_cost_sensor, hour_start, hour_end,
+                )
+                self._real_cost_source = f"sensor:{real_cost_sensor}"
+
             self._last_hour_processed = h
             _LOGGER.info(
-                "Hora %02d procesada: total=%s, assets=%s",
+                "Hora %02d procesada: total=%.3f kWh, coste real=%s",
                 h,
-                self._real_hourly[h],
-                {n: vals[h] for n, vals in self._asset_hourly.items()},
+                self._real_hourly_kwh[h] or 0,
+                f"{self._real_hourly_eur[h]:.4f} €" if self._real_hourly_eur[h] is not None else "n/a",
             )
 
     # ── Resolución del precio ───────────────────────────────────────
@@ -323,7 +315,7 @@ class HawkeyeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if prices:
                 return hourly_prices(prices), f"sensor:{sensor_id}"
             _LOGGER.warning(
-                "Sensor de precios %s no proporciona today_prices/tomorrow_prices válidos. "
+                "Sensor de precios %s sin today_prices/tomorrow_prices válidos. "
                 "Usando fallback plano %s €/kWh.",
                 sensor_id, fallback,
             )
@@ -332,13 +324,6 @@ class HawkeyeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return constant_price(fallback), f"flat:{fallback}"
 
     def _read_prices_from_sensor(self, entity_id: str) -> Optional[list[float]]:
-        """Intenta leer los precios horarios de un sensor.
-
-        Acepta:
-          - attributes['today_prices']: dict {"HH:00": precio} o lista 24
-          - attributes['tomorrow_prices']: idem
-          - state numérico (último recurso, repetido 24 veces)
-        """
         state = self.hass.states.get(entity_id)
         if state is None:
             return None
@@ -347,7 +332,6 @@ class HawkeyeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             normalized = self._normalize_prices(attrs.get(key))
             if normalized is not None:
                 return normalized
-        # Fallback: state actual repetido
         try:
             return [float(state.state)] * 24
         except (ValueError, TypeError):
@@ -378,29 +362,27 @@ class HawkeyeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # ── Update principal ────────────────────────────────────────────
 
     async def _async_update_data(self) -> dict[str, Any]:
-        """Tick: lee histórico, calcula M&V, devuelve resultado."""
         if self._unsub_hourly is None:
             await self._async_setup()
 
         now = dt_util.now()
 
-        # 1. Actualizar las medidas leyendo del histórico
+        # 1. Actualizar medidas desde Recorder
         await self._update_hourly_consumption(now)
 
-        # 2. Construir la HawkeyeConfig (con overrides) y la HourlyMV
+        # 2. Construir HawkeyeConfig + HourlyMV
         target_date = self._current_date or now.date()
         assets = self._build_assets(target_date)
         config = HawkeyeConfig(assets=assets)
 
-        # Reorganizar self._asset_hourly en HourlyData por asset
         asset_consumptions = {
             name: HourlyData.from_list(list(values))
-            for name, values in self._asset_hourly.items()
+            for name, values in self._asset_hourly_kwh.items()
         }
 
         mv = HourlyMV(
             target_date=target_date,
-            total_consumption=HourlyData.from_list(list(self._real_hourly)),
+            total_consumption=HourlyData.from_list(list(self._real_hourly_kwh)),
             asset_consumptions=asset_consumptions,
         )
 
@@ -408,13 +390,17 @@ class HawkeyeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         price_fn, price_source = self._build_price_fn()
         self._price_source = price_source
 
-        # 4. Calcular M&V
+        # 4. Calcular M&V (cálculo puro: kWh)
         result = calculate_mv(config, mv, price_fn)
         self._last_result = result
 
+        # 5. Precalcular costes hora a hora aquí (no en sensor.py)
+        self._calculate_hourly_costs(result, price_fn)
+
         _LOGGER.debug(
-            "M&V calculado para %s: ahorro %.4f € (%d warnings)",
-            target_date, result.total_savings_eur, len(result.warnings),
+            "Update: target=%s, last_hour=%d, baseline_cost=%.4f, real_cost=%.4f, savings=%.4f",
+            target_date, self._last_hour_processed,
+            self._baseline_cost_total, self._real_cost_total, self._savings_today_eur,
         )
 
         return {
@@ -422,13 +408,59 @@ class HawkeyeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "target_date": target_date,
             "result": result,
             "price_source": price_source,
+            "real_cost_source": self._real_cost_source,
             "last_hour_processed": self._last_hour_processed,
-            "overrides_today": self._override_store.get(
-                next(iter(self._asset_sensor_map()), ""), target_date,
-            ) if self._asset_sensor_map() else None,
         }
 
-    # ── API para los sensores ───────────────────────────────────────
+    def _calculate_hourly_costs(self, result: DailyMV, price_fn) -> None:
+        """Calcula los costes hora a hora del baseline y consolida acumulados.
+
+        Para el baseline: baseline_kWh[h] × precio[h]
+        Para el real: si hay sensor de coste real, usa sus deltas; si no,
+                     usa real_kWh[h] × precio[h].
+        Para savings: baseline_eur[h] - real_eur[h], hora a hora.
+        """
+        # Reset
+        self._baseline_hourly_eur = [None] * 24
+        self._baseline_cost_total = 0.0
+        self._real_cost_total = 0.0
+        self._savings_today_eur = 0.0
+
+        last_h = self._last_hour_processed
+        if last_h < 0:
+            return
+
+        for h in range(last_h + 1):
+            # Baseline cost = baseline_kWh × precio
+            b_kwh = result.baseline_curve.at(h)
+            if b_kwh is not None:
+                b_eur = b_kwh * price_fn(h)
+                self._baseline_hourly_eur[h] = b_eur
+                self._baseline_cost_total += b_eur
+            else:
+                self._baseline_hourly_eur[h] = None
+
+            # Real cost: prioridad al sensor del panel HA Energy
+            r_eur = self._real_hourly_eur[h]
+            if r_eur is None:
+                # Fallback: calcular como real_kWh × precio
+                r_kwh = result.real_curve.at(h)
+                if r_kwh is not None:
+                    r_eur = r_kwh * price_fn(h)
+                    self._real_hourly_eur[h] = r_eur
+                    self._real_cost_source = "computed"
+
+            if r_eur is not None:
+                self._real_cost_total += r_eur
+
+            # Savings = baseline_eur - real_eur (esta hora)
+            if (self._baseline_hourly_eur[h] is not None and
+                    self._real_hourly_eur[h] is not None):
+                self._savings_today_eur += (
+                    self._baseline_hourly_eur[h] - self._real_hourly_eur[h]
+                )
+
+    # ── API expuesta a los sensores ─────────────────────────────────
 
     @property
     def last_result(self) -> Optional[DailyMV]:
@@ -439,5 +471,29 @@ class HawkeyeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return self._price_source
 
     @property
+    def real_cost_source(self) -> str:
+        return self._real_cost_source
+
+    @property
     def last_hour_processed(self) -> int:
         return self._last_hour_processed
+
+    @property
+    def baseline_cost_today(self) -> float:
+        return round(self._baseline_cost_total, 4)
+
+    @property
+    def real_cost_today(self) -> float:
+        return round(self._real_cost_total, 4)
+
+    @property
+    def savings_today_eur(self) -> float:
+        return round(self._savings_today_eur, 4)
+
+    @property
+    def baseline_hourly_eur(self) -> list[Optional[float]]:
+        return list(self._baseline_hourly_eur)
+
+    @property
+    def real_hourly_eur(self) -> list[Optional[float]]:
+        return list(self._real_hourly_eur)
