@@ -1,14 +1,11 @@
 """Sensores de Hawkeye.
 
-Cinco sensores (savings_today_kwh eliminado por irrelevante):
-
+Cinco sensores:
   sensor.hawkeye_baseline_today        kWh acumulados del baseline hoy
   sensor.hawkeye_real_today            kWh acumulados reales hoy
   sensor.hawkeye_savings_today_eur     ahorro acumulado en €
   sensor.hawkeye_baseline_cost_today   coste baseline acumulado en €
   sensor.hawkeye_real_cost_today       coste real acumulado en €
-
-Todos los cálculos viven en el coordinator. Aquí sólo leemos propiedades.
 """
 from __future__ import annotations
 
@@ -35,7 +32,6 @@ from .const import (
     ATTR_HOURLY_KWH,
     ATTR_LAST_HOUR_PROCESSED,
     ATTR_NON_MANAGEABLE_KWH,
-    ATTR_OVERRIDES_TODAY,
     ATTR_PRICE_SOURCE,
     ATTR_REAL_COST_SOURCE,
     ATTR_REAL_HOURLY_EUR,
@@ -192,12 +188,7 @@ class RealTodaySensor(_HawkeyeBase):
 
 
 class SavingsTodayEurSensor(_HawkeyeBase):
-    """Ahorro acumulado del día en €.
-
-    Sin device_class para evitar choque con state_class=measurement
-    (HA exige device_class=monetary + state_class=total para "ahorro",
-    pero el ahorro no es monetary stricto sensu — es una diferencia).
-    """
+    """Ahorro acumulado del día en €."""
     _attr_name = "Savings today"
     _attr_native_unit_of_measurement = "EUR"
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -216,12 +207,10 @@ class SavingsTodayEurSensor(_HawkeyeBase):
     def extra_state_attributes(self) -> Optional[dict[str, Any]]:
         if self._result is None:
             return None
-        overrides = self.coordinator._override_store.all_active()
         return {
             ATTR_TARGET_DATE: self._result.target_date.isoformat(),
             ATTR_PRICE_SOURCE: self.coordinator.price_source,
             ATTR_REAL_COST_SOURCE: self.coordinator.real_cost_source,
-            ATTR_OVERRIDES_TODAY: overrides,
         }
 
 
