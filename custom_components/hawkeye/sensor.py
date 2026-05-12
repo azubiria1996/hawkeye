@@ -1,6 +1,6 @@
 """Sensores de Hawkeye.
 
-Cinco sensores (quitamos savings_today_kwh por irrelevante):
+Cinco sensores (savings_today_kwh eliminado por irrelevante):
 
   sensor.hawkeye_baseline_today        kWh acumulados del baseline hoy
   sensor.hawkeye_real_today            kWh acumulados reales hoy
@@ -192,6 +192,12 @@ class RealTodaySensor(_HawkeyeBase):
 
 
 class SavingsTodayEurSensor(_HawkeyeBase):
+    """Ahorro acumulado del día en €.
+
+    Sin device_class para evitar choque con state_class=measurement
+    (HA exige device_class=monetary + state_class=total para "ahorro",
+    pero el ahorro no es monetary stricto sensu — es una diferencia).
+    """
     _attr_name = "Savings today"
     _attr_native_unit_of_measurement = "EUR"
     _attr_state_class = SensorStateClass.MEASUREMENT
