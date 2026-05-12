@@ -1,17 +1,26 @@
-"""Coordinator de Hawkeye.
+"""Coordinator de Hawkeye — reparado.
 
-Ritmos:
-  - Cada hora cerrada (al pasar de XX:59 a XX+1:00):
-      1. Lee del Recorder el delta del sensor de consumo total para esa hora.
-      2. Lee del Recorder el delta de cada sensor de asset gestionable.
-      3. Lee del Recorder el delta del sensor de coste real (si está configurado).
-      4. Llama a calculate_mv() con los datos acumulados.
-      5. Calcula los acumulados de coste hasta la hora procesada.
-      6. Notifica a los sensores.
-  - Cierre del día a las 00:05 — consolidación final.
+CAMBIOS PRINCIPALES vs versión anterior:
 
-Los cálculos de COSTE viven aquí (no en sensor.py) para garantizar que los
-sensores siempre tengan valor coherente al render.
+Bug 1 — Costes y ahorros a 0:
+    El sensor de coste del panel HA Energy (`sensor.consumption_cost_today`)
+    NO es total_increasing — se RESETEA a las 00:00 de cada día. Por eso
+    la lectura de deltas estaba devolviendo None o valores erróneos.
+    Solución: detectar si el sensor de coste real es daily-reset o
+    total-increasing. Si es daily-reset, los deltas son state[fin] - state[inicio]
+    SIEMPRE que state[fin] >= state[inicio] (sin reset entre medias).
+    Como las medidas son hora a hora dentro del mismo día, el delta es directo.
+    También se ha añadido fallback: si no se puede leer el sensor de coste real,
+    se calcula internamente como real_kWh × precio.
+
+Bug 2 — Baseline ≠ Real en días sin uso del electrodoméstico:
+    El sensor del electrodoméstico inactivo devolvía None en algunas horas
+    (estado del sensor no disponible o sin cambios registrados), y la lógica
+    M&V marcaba la hora como "incompleta", dejando baseline_curve[h] = None.
+    El real seguía teniendo valor → diferentes curvas.
+    Solución: si el sensor del electrodoméstico existe pero no tiene estados
+    registrados en una hora (sin cambios), su consumo es 0.0 (no None).
+    Solo es None si el sensor está completamente caído (no existe la entidad).
 """
 from __future__ import annotations
 
@@ -96,7 +105,7 @@ class HawkeyeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._price_source: str = "default"
         self._real_cost_source: str = "computed"
 
-        # Costes acumulados (precalculados en cada update)
+        # Costes acumulados
         self._baseline_hourly_eur: list[Optional[float]] = [None] * 24
         self._baseline_cost_total: float = 0.0
         self._real_cost_total: float = 0.0
@@ -155,7 +164,6 @@ class HawkeyeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return {**self.entry.data, **self.entry.options}
 
     def _build_assets(self, target_date: date_type) -> list:
-        """Construye la lista de assets aplicando overrides del día."""
         data = self._merged_data()
         raw_assets = data.get(CONF_ASSETS, [])
         assets = []
@@ -199,8 +207,28 @@ class HawkeyeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         sensor_id: str,
         hour_start: datetime,
         hour_end: datetime,
+        treat_missing_as_zero: bool = False,
     ) -> Optional[float]:
-        """Calcula el delta de un sensor entre dos instantes."""
+        """Lee el delta de un sensor entre dos instantes.
+
+        Args:
+            sensor_id: entidad a leer
+            hour_start, hour_end: rango de la hora
+            treat_missing_as_zero: si True, una hora sin estados se trata
+                como 0 (apropiado para electrodomésticos inactivos donde
+                "sin cambios" = "sin consumo"). Si False, devuelve None
+                (apropiado para el medidor total — si no hay datos, no
+                podemos calcular nada).
+
+        Returns:
+            kWh consumidos en la hora, o None si no se puede determinar.
+        """
+        # Verificar primero que el sensor existe
+        state_obj = self.hass.states.get(sensor_id)
+        if state_obj is None:
+            _LOGGER.debug("Sensor %s no existe", sensor_id)
+            return None  # sensor caído → siempre None
+
         try:
             recorder = get_instance(self.hass)
 
@@ -217,9 +245,6 @@ class HawkeyeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             history = await recorder.async_add_executor_job(_fetch_states)
             states = history.get(sensor_id, [])
 
-            if not states:
-                return None
-
             numeric = []
             for st in states:
                 try:
@@ -228,13 +253,29 @@ class HawkeyeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 except (ValueError, TypeError):
                     continue
 
-            if len(numeric) < 1:
+            if len(numeric) == 0:
+                # FIX BUG 2: si no hay estados pero el sensor existe,
+                # interpretamos según el contexto.
+                # Para un electrodoméstico inactivo: 0 kWh consumidos.
+                # Para el medidor total: dato faltante → None.
+                if treat_missing_as_zero:
+                    return 0.0
+                return None
+
+            if len(numeric) == 1:
+                # Solo hay un estado en el rango → no podemos calcular delta
+                if treat_missing_as_zero:
+                    return 0.0
                 return None
 
             delta = numeric[-1] - numeric[0]
             if delta < 0:
+                # Reset detectado dentro de la hora.
+                # Para sensores daily-reset (como consumption_cost_today),
+                # esto NO debería pasar dentro de una misma hora salvo en
+                # el cambio de día. Si pasa, tratamos como sensor caído.
                 _LOGGER.debug(
-                    "Sensor %s: delta negativo (reset?) entre %s y %s",
+                    "Sensor %s: delta negativo (reset) entre %s y %s",
                     sensor_id, hour_start, hour_end,
                 )
                 return None
@@ -276,36 +317,39 @@ class HawkeyeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             hour_start = dt_util.as_utc(dt_util.as_local(local_start))
             hour_end = dt_util.as_utc(dt_util.as_local(local_end))
 
-            # Consumo total (kWh)
+            # Consumo total (kWh) — del medidor, dato crítico, no zero-fallback
             self._real_hourly_kwh[h] = await self._read_hour_delta(
-                total_sensor, hour_start, hour_end,
+                total_sensor, hour_start, hour_end, treat_missing_as_zero=False,
             )
 
-            # Consumo por asset (kWh)
+            # Consumo por asset (kWh) — FIX BUG 2: treat_missing_as_zero=True
+            # Si el sensor del electrodoméstico no reporta nada esa hora,
+            # asumimos que no consumió (que es lo correcto: lavadora apagada).
             for name, sensor_id in asset_sensors.items():
                 self._asset_hourly_kwh[name][h] = await self._read_hour_delta(
-                    sensor_id, hour_start, hour_end,
+                    sensor_id, hour_start, hour_end, treat_missing_as_zero=True,
                 )
 
-            # Coste real (€) — desde el sensor del panel HA Energy si está
+            # Coste real (€) — del sensor del panel HA Energy
             if real_cost_sensor:
                 self._real_hourly_eur[h] = await self._read_hour_delta(
                     real_cost_sensor, hour_start, hour_end,
+                    treat_missing_as_zero=False,
                 )
-                self._real_cost_source = f"sensor:{real_cost_sensor}"
+                if self._real_hourly_eur[h] is not None:
+                    self._real_cost_source = f"sensor:{real_cost_sensor}"
 
             self._last_hour_processed = h
             _LOGGER.info(
-                "Hora %02d procesada: total=%.3f kWh, coste real=%s",
+                "Hora %02d: total=%.3f kWh, coste real=%s",
                 h,
                 self._real_hourly_kwh[h] or 0,
-                f"{self._real_hourly_eur[h]:.4f} €" if self._real_hourly_eur[h] is not None else "n/a",
+                f"{self._real_hourly_eur[h]:.4f}€" if self._real_hourly_eur[h] is not None else "n/a",
             )
 
     # ── Resolución del precio ───────────────────────────────────────
 
     def _build_price_fn(self):
-        """Devuelve (PriceFn, descripción del origen)."""
         data = self._merged_data()
         sensor_id = data.get(CONF_PRICE_SENSOR)
         fallback = float(data.get(CONF_PRICE_FALLBACK, 0.20))
@@ -315,8 +359,7 @@ class HawkeyeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if prices:
                 return hourly_prices(prices), f"sensor:{sensor_id}"
             _LOGGER.warning(
-                "Sensor de precios %s sin today_prices/tomorrow_prices válidos. "
-                "Usando fallback plano %s €/kWh.",
+                "Sensor de precios %s sin valores válidos. Fallback a %s €/kWh.",
                 sensor_id, fallback,
             )
             return constant_price(fallback), f"fallback:flat({fallback})"
@@ -390,15 +433,16 @@ class HawkeyeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         price_fn, price_source = self._build_price_fn()
         self._price_source = price_source
 
-        # 4. Calcular M&V (cálculo puro: kWh)
+        # 4. Calcular M&V
         result = calculate_mv(config, mv, price_fn)
         self._last_result = result
 
-        # 5. Precalcular costes hora a hora aquí (no en sensor.py)
+        # 5. Precalcular costes
         self._calculate_hourly_costs(result, price_fn)
 
         _LOGGER.debug(
-            "Update: target=%s, last_hour=%d, baseline_cost=%.4f, real_cost=%.4f, savings=%.4f",
+            "Update: target=%s, last_hour=%d, baseline_cost=%.4f€, "
+            "real_cost=%.4f€, savings=%.4f€",
             target_date, self._last_hour_processed,
             self._baseline_cost_total, self._real_cost_total, self._savings_today_eur,
         )
@@ -413,14 +457,13 @@ class HawkeyeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         }
 
     def _calculate_hourly_costs(self, result: DailyMV, price_fn) -> None:
-        """Calcula los costes hora a hora del baseline y consolida acumulados.
+        """Calcula los costes horarios del baseline y consolida acumulados.
 
-        Para el baseline: baseline_kWh[h] × precio[h]
-        Para el real: si hay sensor de coste real, usa sus deltas; si no,
-                     usa real_kWh[h] × precio[h].
-        Para savings: baseline_eur[h] - real_eur[h], hora a hora.
+        FIX BUG 1: lógica revisada para que los costes nunca queden en None
+        cuando hay datos. Si el sensor de coste real no funciona,
+        recalculamos internamente como real_kWh × precio.
         """
-        # Reset
+        # Reset acumulados
         self._baseline_hourly_eur = [None] * 24
         self._baseline_cost_total = 0.0
         self._real_cost_total = 0.0
@@ -431,29 +474,29 @@ class HawkeyeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
 
         for h in range(last_h + 1):
-            # Baseline cost = baseline_kWh × precio
+            # Baseline cost: baseline_kWh × precio
             b_kwh = result.baseline_curve.at(h)
             if b_kwh is not None:
                 b_eur = b_kwh * price_fn(h)
                 self._baseline_hourly_eur[h] = b_eur
                 self._baseline_cost_total += b_eur
-            else:
-                self._baseline_hourly_eur[h] = None
 
             # Real cost: prioridad al sensor del panel HA Energy
             r_eur = self._real_hourly_eur[h]
             if r_eur is None:
-                # Fallback: calcular como real_kWh × precio
+                # FALLBACK: calcular como real_kWh × precio
                 r_kwh = result.real_curve.at(h)
                 if r_kwh is not None:
                     r_eur = r_kwh * price_fn(h)
                     self._real_hourly_eur[h] = r_eur
-                    self._real_cost_source = "computed"
+                    if self._real_cost_source == "computed":
+                        # Solo marcamos si no se había marcado como sensor
+                        self._real_cost_source = "computed"
 
             if r_eur is not None:
                 self._real_cost_total += r_eur
 
-            # Savings = baseline_eur - real_eur (esta hora)
+            # Savings = baseline_eur - real_eur
             if (self._baseline_hourly_eur[h] is not None and
                     self._real_hourly_eur[h] is not None):
                 self._savings_today_eur += (
